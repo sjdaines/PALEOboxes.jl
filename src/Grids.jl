@@ -133,7 +133,7 @@ Concrete subtypes should implement methods:
 
 [`PB.Grids.set_subdomain!`](@ref), [`PB.Grids.get_subdomain`](@ref)
 
-[`PB.Grids.create_default_cellrange`](@ref), [`PB.Grids.get_region`](@ref)
+[`PB.Grids.create_default_cellrange`](@ref)
 """
 PB.AbstractMesh
 
@@ -153,13 +153,7 @@ Create a CellRange for entire `domain` and supplied `operatorID`
 """
 function create_default_cellrange(domain::PB.AbstractDomain, grid::Union{PB.AbstractMesh, Nothing}) end
 
-"""
-    get_region(grid::Union{PB.AbstractMesh, Nothing}, values; selectargs...) -> values_subset, (dim_subset::NamedDimension, ...)
 
-Return the subset of `values` given by `selectargs` (Grid-specific keywords eg cell=, column=, ...)
-and corresponding dimensions (with attached coordinates).
-"""
-function get_region(grid::Union{PB.AbstractMesh, Nothing}, values) end
 
 """
     set_subdomain!(grid::PB.AbstractMesh, subdomainname::AbstractString, subdom::PB.AbstractSubdomain, allowcreate::Bool=false)
@@ -228,17 +222,7 @@ function create_default_cellrange(domain::PB.AbstractDomain, grid::Nothing; oper
     return PB.CellRange(domain=domain, indices=1:PB.get_length(domain), operatorID=operatorID)
 end
 
-"""
-    get_region(grid::Nothing, values) -> values[]
 
-Fallback for Domain with no grid, assumed 1 cell
-"""
-function get_region(grid::Nothing, values)
-    length(values) == 1 ||
-        throw(ArgumentError("grid==Nothing and length(values) != 1"))
-    return values[], ()
-end
-   
 ##################################
 # UnstructuredVectorGrid
 ##################################
@@ -265,27 +249,6 @@ end
 
 PB.internal_size(space::Type{PB.CellSpace}, grid::UnstructuredVectorGrid) = (grid.ncells, )
 
-"""
-    get_region(grid::UnstructuredVectorGrid, values; cell) -> 
-        values_subset, (dim_subset::NamedDimension, ...)
-
-# Keywords for region selection:
-- `cell::Union{Int, Symbol}`: an Int, or a Symbol to look up in `cellnames`
-"""
-function get_region(grid::UnstructuredVectorGrid, values; cell::Union{Int, Symbol})
-    if cell isa Int
-        idx = cell
-    else
-        idx = get(grid.cellnames, cell, nothing)
-        !isnothing(idx) ||
-            throw(ArgumentError("cell ':$cell' not present in  grid.cellnames=$(grid.cellnames)"))
-    end
-
-    return (
-        values[idx],
-        (),  # no dimensions (ie squeeze out a dimension length 1 for single cell)
-    )
-end
 
 """
     create_default_cellrange(domain, grid::UnstructuredVectorGrid [; operatorID=0]) -> CellRange
@@ -309,14 +272,14 @@ Minimal Grid for a Vector Domain composed of columns (not necessarily forming a 
 - `ncells::Int` total number of cells in this Domain
 - `Icolumns::Vector{Vector{Int}}`: Icolumns[n] should be the indices of column n, in order from surface to floor, where n is also the index of 
 any associated boundary surface.
-- `z_coords::Vector{FixedCoord}`: z coordinates of cell mid point, lower surface, upper surface
+- `z_coords::Vector{String}`: names of Variables to use for z coordinates of cell mid point, lower surface, upper surface
 - `columnnames::Vector{Symbol}:` optional column names
 """
 Base.@kwdef mutable struct UnstructuredColumnGrid <: PB.AbstractMesh
     ncells::Int64    
     Icolumns::Vector{Vector{Int}}    
 
-    z_coords::Vector{PB.FixedCoord} = PB.FixedCoord[]
+    z_coords::Vector{String} = String[]
 
     "Define optional column names"
     columnnames::Vector{Symbol} = Symbol[]
@@ -333,42 +296,6 @@ end
 PB.internal_size(space::Type{PB.CellSpace}, grid::UnstructuredColumnGrid) = (grid.ncells, )
 PB.internal_size(space::Type{PB.ColumnSpace}, grid::UnstructuredColumnGrid) = (length(grid.Icolumns), )
 
-"""
-    get_region(grid::UnstructuredColumnGrid, values; column, [cell=nothing]) -> 
-        values_subset, (dim_subset::NamedDimension, ...)
-
-# Keywords for region selection:
-- `column::Union{Int, Symbol}`: (may be an Int, or a Symbol to look up in `columnames`)
-- `cell::Int`: optional cell index within `column`, highest cell is cell 1
-"""
-function get_region(grid::UnstructuredColumnGrid, values; column, cell::Union{Nothing, Int}=nothing)
-
-    if column isa Int
-        column in 1:length(grid.Icolumns) ||
-            throw(ArgumentError("column index $column out of range"))
-        colidx = column
-    else
-        colidx = findfirst(isequal(column), grid.columnnames)
-        !isnothing(colidx) || 
-            throw(ArgumentError("columnname '$column' not present in  grid.columnnames=$(grid.columnnames)"))
-    end
-
-    if isnothing(cell)
-        indices = grid.Icolumns[colidx]
-        return (
-            values[indices],
-            (PB.NamedDimension("z", length(indices), PB.get_region(grid.z_coords, indices)), ),
-        )
-    else
-        # squeeze out z dimension
-        idx = grid.Icolumns[colidx][cell]
-        return (
-            values[idx],
-            (),  # no dimensions (ie squeeze out a dimension length 1 for single cell)
-        )
-    end
-    
-end
 
 """
     create_default_cellrange(domain, grid::UnstructuredColumnGrid [; operatorID=0]) -> CellRangeColumns
@@ -497,71 +424,6 @@ PB.internal_size(space::Type{PB.CellSpace}, grid::CartesianArrayGrid) = Tuple(gr
 PB.cartesian_size(grid::CartesianArrayGrid) = Tuple(grid.dims)
 
 
-"""
-    get_region(grid::Union{CartesianLinearGrid{2}, CartesianArrayGrid{2}} , internalvalues; [i=i_idx], [j=j_idx]) ->
-        arrayvalues_subset, (dim_subset::NamedDimension, ...)
-
-# Keywords for region selection:
-- `i::Int`: optional, slice along first dimension
-- `j::Int`: optional, slice along second dimension
-
-`internalvalues` are transformed if needed from internal Field representation as a Vector length `ncells`, to
-an Array (2D if neither i, j arguments present, 1D if i or j present, 0D ie one cell if both present)
-"""
-function get_region(
-    grid::Union{CartesianLinearGrid{2}, CartesianArrayGrid{2}}, internalvalues; 
-    i::Union{Integer, Colon}=Colon(), j::Union{Integer, Colon}=Colon()
-)
-    return _get_region(grid, internalvalues, [i, j])
-end
-
-"""
-    get_region(grid::Union{CartesianLinearGrid{3}, CartesianArrayGrid{3}}, internalvalues; [i=i_idx], [j=j_idx]) ->
-        arrayvalues_subset, (dim_subset::NamedDimension, ...)
-
-# Keywords for region selection:
-- `i::Int`: optional, slice along first dimension
-- `j::Int`: optional, slice along second dimension
-- `k::Int`: optional, slice along third dimension
-
-`internalvalues` are transformed if needed from internal Field representation as a Vector length `ncells`, to
-an Array (3D if neither i, j, k arguments present, 2D if one of i, j or k present, 1D if two present,
-0D ie one cell if i, j, k all specified).
-"""
-function get_region(
-    grid::Union{CartesianLinearGrid{3}, CartesianArrayGrid{3}}, internalvalues;
-    i::Union{Integer, Colon}=Colon(), j::Union{Integer, Colon}=Colon(), k::Union{Integer, Colon}=Colon()
-)
-    return _get_region(grid, internalvalues, [i, j, k])
-end
-
-function _get_region(
-    grid::Union{CartesianLinearGrid, CartesianArrayGrid}, internalvalues, indices
-)
-    if !isempty(grid.coords) && !isempty(grid.coords_edges)
-        dims = [
-            PB.NamedDimension(grid.dimnames[idx], grid.coords[idx], grid.coords_edges[idx])
-            for (idx, ind) in enumerate(indices) if isa(ind, Colon)
-        ]
-    elseif !isempty(grid.coords)
-        dims = [
-            PB.NamedDimension(grid.dimnames[idx], grid.coords[idx])
-            for (idx, ind) in enumerate(indices) if isa(ind, Colon)
-        ]
-    else
-        dims = [
-            PB.NamedDimension(grid.dimnames[idx])
-            for (idx, ind) in enumerate(indices) if isa(ind, Colon)
-        ]
-    end
-
-    values = internal_to_cartesian(grid, internalvalues)
-    if !all(isequal(Colon()), indices)
-        values = values[indices...]
-    end
-
-    return values, Tuple(dims)    
-end
 
 """
     CartesianGrid(
